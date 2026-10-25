@@ -13,8 +13,8 @@ More tools serve what the CLI lacks: `invoke` (admit a capability run, like
 Astrid's own agent tool), `skills_list`/`skill_get` (the pack
 skills, also offered as MCP prompts, which only users can invoke) and the
 `timeline_document_*` tools (the rendering pack's JSON timeline route, needed to
-put the first clips on an empty timeline). Tools are annotated read-only or mutating so clients can ask
-before changes. Preference writes are not exposed: preferences are added to
+put the first clips on an empty timeline). Tool definitions omit read-only and
+mutating annotations. Preference writes are not exposed: preferences are added to
 every agent's system prompt, so an outside agent must not be able to set them.
 
 Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout (MCP stdio). Logs go
@@ -203,6 +203,8 @@ def argv_for(tool: dict[str, Any], arguments: dict[str, Any], workdir: Path | No
             flags += [option, str(value)]
     if tool["path"] == ("timelines", "render"):
         flags.append("--detach")
+    if tool["path"] == ("timelines", "edit") and "--no-sweep" not in flags:
+        flags.append("--no-sweep")
     return argv + flags + (["--json"] if tool["json"] else [])
 
 
@@ -248,7 +250,7 @@ def call_tool(tool: dict[str, Any], arguments: dict[str, Any], state: dict[str, 
             return _invoke(arguments, workdir)
         if kind == "comfy_scan":
             done = _run([sys.executable, "-m", "astrid.packs.vibecomfy.local", "scan",
-                         "--ports", str(arguments.get("ports") or "8188,8000")], workdir)
+                         "--ports", str(arguments.get("ports") or "8188,8000")], Path.cwd())
             return done if isinstance(done, dict) else _cli_result(done)
         if kind == "comfy_workflow_import":
             return _comfy_workflow_import(arguments, workdir)
@@ -263,7 +265,7 @@ def call_tool(tool: dict[str, Any], arguments: dict[str, Any], state: dict[str, 
             return _text(f"invalid arguments: {exc}", error=True)
         executable = Path(sys.executable).with_name("astrid-tools")
         command = [str(executable)] if executable.exists() else [sys.executable, "-m", "astrid.core.gateway"]
-        done = _run([*command, *argv], workdir)
+        done = _run([*command, *argv], Path.cwd())
         if isinstance(done, dict):
             return done
         result = _cli_result(done)
@@ -281,6 +283,7 @@ def _comfy_workflow_import(arguments: dict[str, Any], workdir: Path) -> dict[str
 
     The vibecomfy skill's "fetch it read-only, then astrid media import" step, for a
     client that cannot reach Astrid's filesystem."""
+    import http.client
     import urllib.error
     import urllib.parse
     import urllib.request
@@ -299,7 +302,7 @@ def _comfy_workflow_import(arguments: dict[str, Any], workdir: Path) -> dict[str
             parts.username is not None or parts.password is not None or parts.query or parts.fragment):
         return _text("comfy_url must be loopback, e.g. http://127.0.0.1:8188", error=True)
     name = str(arguments.get("name") or "")
-    if not name.endswith(".json") or "/" in name or "\\" in name or name.startswith("."):
+    if "\x00" in name or not name.endswith(".json") or "/" in name or "\\" in name or name.startswith("."):
         return _text("name must be a saved workflow file name such as portrait.json (see comfy_scan)", error=True)
     source = f"{url}/userdata/{urllib.parse.quote('workflows/' + name, safe='')}"
     try:
@@ -307,10 +310,10 @@ def _comfy_workflow_import(arguments: dict[str, Any], workdir: Path) -> dict[str
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
 
-        opener = urllib.request.build_opener(RefuseRedirects)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RefuseRedirects)
         with opener.open(source, timeout=30) as response:
             raw = response.read(64 * 1024 * 1024 + 1)
-    except (OSError, urllib.error.URLError) as exc:
+    except (http.client.HTTPException, OSError, urllib.error.URLError) as exc:
         return _text(f"could not read {source}: {exc}", error=True)
     if len(raw) > 64 * 1024 * 1024:
         return _text("workflow is larger than 64 MiB", error=True)
@@ -322,7 +325,7 @@ def _comfy_workflow_import(arguments: dict[str, Any], workdir: Path) -> dict[str
     target.write_bytes(raw)
     executable = Path(sys.executable).with_name("astrid-tools")
     command = [str(executable)] if executable.exists() else [sys.executable, "-m", "astrid.core.gateway"]
-    done = _run([*command, "media", "import", str(target), "--project", project, "--json"], workdir)
+    done = _run([*command, "media", "import", str(target), "--project", project, "--json"], Path.cwd())
     return done if isinstance(done, dict) else _cli_result(done)
 
 
@@ -331,7 +334,7 @@ def _invoke(arguments: dict[str, Any], workdir: Path) -> dict[str, Any]:
     request = {key: arguments[key] for key in ("capability_id", "kind", "project", "inputs", "execution_request")
                if arguments.get(key) is not None}
     request.setdefault("kind", "executor")
-    done = _run([sys.executable, "-m", "astrid.omp_invoke", json.dumps(request)], workdir)
+    done = _run([sys.executable, "-m", "astrid.omp_invoke", json.dumps(request)], Path.cwd())
     if isinstance(done, dict):
         return done
     try:
@@ -383,7 +386,7 @@ def _timeline_document(command: str, arguments: dict[str, Any], workdir: Path) -
                 argv += ["--idempotency-key", str(arguments["idempotency_key"])]
     except KeyError as exc:
         return _text(f"invalid arguments: missing {exc.args[0]}", error=True)
-    done = _run(argv, workdir)
+    done = _run(argv, Path.cwd())
     if isinstance(done, dict):
         return done
     result = _cli_result(done)
@@ -403,6 +406,8 @@ def _timeline_document_add_shot(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         body = arguments["document"]
         work = json.loads(body) if isinstance(body, str) else body
+        if not isinstance(work, dict):
+            raise TypeError("document must be a JSON object")
         before = {row.get("shot_id") for row in work.get("placements", [])}
         # An occurrence ID is what makes the helper place the shot on the timeline.
         occurrence = arguments.get("occurrence_id") or f"occurrence-{uuid.uuid4().hex[:12]}"
