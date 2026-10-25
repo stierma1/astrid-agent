@@ -268,8 +268,7 @@
         "auth_style": "bearer",
         "header_name": "authorization",
         "binaries": [
-          "astrid_tools",
-          "shell_tools"
+          "astrid_tools"
         ],
         "replaces_rule": "huggingface_api"
       }

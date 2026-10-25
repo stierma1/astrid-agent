@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Run Astrid inside an NVIDIA OpenShell microVM sandbox instead of your own
 # account. The sandbox has its own kernel and sees none of your files. Its
 # network access is what you pick: a mode (locked, or read-only dev sources)
@@ -66,6 +66,10 @@ in_sandbox_tty() { osh sandbox exec -n "$sandbox" --tty -- sh -c "$1"; }
 command -v python3 >/dev/null 2>&1 || die "python3 is needed on this machine."
 compose() { python3 -I "$here/compose_policy.py" "$@"; }
 field() { compose field "$1" "$2"; }
+new_policy_file() {
+    policy_dir=$(mktemp -d "${TMPDIR:-/tmp}/astrid-openshell-policy.XXXXXX")
+    file="$policy_dir/policy.json"
+}
 
 # --- saved selection (written by the menu; nobody needs to edit it) ----------
 # mode=dev
@@ -111,7 +115,14 @@ drop_service() {
     selected=$(echo $out)
 }
 # The shared ComfyUI output folder is part of every policy for this sandbox.
-mount_args() { [ -n "$created_mount" ] && printf -- '--mount %s' "$created_mount"; return 0; }
+mount_args=()
+set_mount_args() {
+    mount_args=()
+    if [ -n "$created_mount" ]; then
+        mount_args=(--mount "$created_mount")
+    fi
+    return 0
+}
 
 # OpenShell trusts its TLS proxy through GIT_SSL_CAINFO (among other CA
 # variables). Astrid's render launch refuses unknown GIT_* variables, so Astrid
@@ -143,11 +154,13 @@ EOF
 }
 
 set_policy() {   # $1: compose arguments as one string
-    file=$(mktemp --suffix=.json)
-    # shellcheck disable=SC2086
-    compose $(mount_args) $1 >"$file"
+    new_policy_file
+    set_mount_args
+    local -a policy_args=()
+    read -r -a policy_args <<<"$1"
+    compose "${mount_args[@]}" "${policy_args[@]}" >"$file"
     osh policy set "$sandbox" --policy "$file" --wait >/dev/null
-    rm -f "$file"
+    rm -rf "$policy_dir"
 }
 
 cmd_create() {
@@ -166,9 +179,9 @@ cmd_create() {
         created_mount=$comfyui_output
         say "Sharing ComfyUI's output folder read-only: $comfyui_output_real -> $comfyui_output"
     fi
-    file=$(mktemp --suffix=.json)
-    # shellcheck disable=SC2046
-    compose $(mount_args) install >"$file"
+    new_policy_file
+    set_mount_args
+    compose "${mount_args[@]}" install >"$file"
     # --no-auto-providers: never copy credentials from this shell into the
     # sandbox. `sleep infinity` keeps the VM up; Runtime runs beside it.
     if [ -n "$mounts" ]; then
@@ -179,7 +192,7 @@ cmd_create() {
         osh sandbox create --name "$sandbox" --from "$image" --policy "$file" \
             --no-auto-providers --no-tty --label app=astrid --detach -- sleep infinity
     fi
-    rm -f "$file"
+    rm -rf "$policy_dir"
     save_state
 }
 
@@ -290,10 +303,11 @@ read_key() {
 # read_key) and attach it.
 attach_credential() {
     name=$1
-    profile=$(mktemp --suffix=.yaml)
+    profile_dir=$(mktemp -d "${TMPDIR:-/tmp}/astrid-openshell-profile.XXXXXX")
+    profile="$profile_dir/provider.yaml"
     compose profile "$name" >"$profile"
     osh profile import -f "$profile" >/dev/null 2>&1 || osh profile update -f "$profile" "astrid-$name" >/dev/null
-    rm -f "$profile"
+    rm -rf "$profile_dir"
     # The key reaches openshell through its environment, never its arguments.
     if osh provider get "astrid-$name" >/dev/null 2>&1; then
         env "$env_var=$value" "$os_cli" -g "$gateway" provider update "astrid-$name" --credential "$env_var" >/dev/null
@@ -351,6 +365,11 @@ configure_comfyui() {
     case "$out" in /*) ;; *) die "the output folder must be an absolute path" ;; esac
     real=$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$out")
     [ -d "$real" ] || die "$out is not a folder"
+    [ "$real" != / ] || die "the output folder cannot be /"
+    home_real=$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$HOME")
+    case "$home_real/" in
+        "$real/"*) die "the output folder cannot be $HOME or any parent of it" ;;
+    esac
     [ "$real" != "$out" ] && say "  $out is (or passes through) a symlink; sharing its real path $real"
     comfyui_output=$out
     comfyui_output_real=$real
@@ -544,29 +563,10 @@ cmd_logout() {
 # MCP server (python -m astrid.mcp_server) inside the sandbox, on this
 # command's stdin/stdout, for an MCP client on this machine:
 #   claude mcp add astrid -- /path/to/astrid-openshell.sh mcp
-# Until Astrid ships the module, a copy from this checkout is uploaded when the
-# sandbox's copy is missing or different. Nothing but MCP goes to stdout.
+# Nothing but MCP goes to stdout.
 cmd_mcp() {
-    src="$here/../../astrid/mcp_server.py"
-    if in_sandbox "r=\$HOME/.local/share/astrid; \$r/versions/\$(cat \$r/current)/py/bin/python -I -c 'import astrid.mcp_server'" >/dev/null 2>&1; then
-        launch='exec "$py" -I -m astrid.mcp_server'
-    elif [ -f "$src" ]; then
-        want=$(sha256sum "$src" | cut -d' ' -f1)
-        have=$(in_sandbox "sha256sum \$HOME/astrid-mcp/mcp_server.py 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
-        if [ "$want" != "$have" ]; then
-            staging=$(mktemp -d)
-            mkdir -p "$staging/astrid-mcp"
-            cp "$src" "$staging/astrid-mcp/mcp_server.py"
-            in_sandbox "rm -rf \$HOME/astrid-mcp" >&2
-            osh sandbox upload --no-git-ignore "$sandbox" "$staging/astrid-mcp" "$guest_home" >&2 2>&1
-            rm -rf "$staging"
-        fi
-        launch='exec "$py" -I "$HOME/astrid-mcp/mcp_server.py"'
-    else
-        die "this Astrid has no MCP server (astrid.mcp_server) and no copy was found at $src"
-    fi
     exec "$os_cli" -g "$gateway" sandbox exec -n "$sandbox" --no-tty -- sh -c \
-        "$git_ca_to_config; r=\$HOME/.local/share/astrid; py=\$r/versions/\$(cat \$r/current)/py/bin/python; $launch"
+        "$git_ca_to_config; r=\$HOME/.local/share/astrid; py=\$r/versions/\$(cat \$r/current)/py/bin/python; exec \"\$py\" -I -m astrid.mcp_server"
 }
 
 door_answers() {
@@ -579,9 +579,8 @@ cmd_start() {
         say "Runtime is already running (door answers inside the sandbox)."
         return
     fi
-    # Without systemd, Astrid's documented restart is the install line, which
-    # re-bootstraps from the network. Start Runtime the way the installer's
-    # no-systemd fallback does (restart: `restart`).
+    # Without systemd, start Runtime the way the installer's detached fallback
+    # does. The wrapper's `restart` command stops it with Runtime's `down` first.
     in_sandbox "$git_ca_to_config; cd '$guest_home/.local/share/astrid' && V=versions/\$(cat current) && \"\$V/py/bin/python\" -I -c '
 from pathlib import Path
 from astrid.installer.core import current
@@ -637,8 +636,9 @@ import json, sys
 policy = json.load(sys.stdin)["policy"]
 policy["version"] = 1
 json.dump(policy, sys.stdout)' >"$tmp/live.json"
-    # shellcheck disable=SC2086
-    compose $(mount_args) boundary "$mode" $(for_compose $selected) >"$tmp/boundary.json"
+    set_mount_args
+    # shellcheck disable=SC2046
+    compose "${mount_args[@]}" boundary "$mode" $(for_compose $selected) >"$tmp/boundary.json"
     # The prover models neither allow_encoded_slash (npm scoped packages,
     # ComfyUI's saved workflows) nor WebSocket endpoints (ComfyUI's /ws). Every
     # such endpoint in the live policy must appear exactly in the composed one;

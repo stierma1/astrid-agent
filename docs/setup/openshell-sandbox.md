@@ -41,6 +41,29 @@ What it does not do: the hosted page and the agent can still do anything
 *inside* the sandbox, including spending whatever LLM key is attached. Use a
 throwaway key with a spend cap.
 
+## Threat model
+
+OpenShell gives Astrid a separate VM kernel and limits guest network access to
+the selected policy. The guest does not inherit the host's ordinary files or
+network access, except for services and shares you explicitly expose.
+
+That boundary has limits:
+
+- **The ComfyUI API can execute code on the host.** The allowed `POST /prompt`
+  endpoint queues workflows, and custom nodes loaded by the host's ComfyUI run
+  in its process with the host user's permissions. A sandboxed agent can
+  therefore trigger those custom nodes. Use only trusted nodes, preferably in
+  a separate ComfyUI instance.
+- **ComfyUI user data is readable.** The policy allows `GET /userdata/*`, so
+  sandboxed code can read files exposed there through the host's ComfyUI API.
+- **Codex has full access inside the VM.** Nested Codex sandboxing is disabled,
+  so Codex runs with `danger-full-access` in the guest. The VM and its network
+  policy are the boundary for those commands.
+- **The output share weakens host isolation.** With a host folder share,
+  libkrun does not confine a compromised guest kernel to that folder; it may
+  reach other files the gateway user can read. See the ComfyUI share warning
+  below.
+
 ## Requirements
 
 - Linux x86_64 with `/dev/kvm` usable by your user (the `kvm` group).
@@ -72,9 +95,9 @@ scripts/openshell/astrid-openshell.sh services mode dev
 |---|---|---|
 | ChatGPT plan via Astrid's agent | Astrid's own agent (omp, a Pi derivative) may reach chatgpt.com and auth.openai.com, from Bun only. Sign in with `astrid-openshell.sh login chatgpt`: in the agent, `/login` → "ChatGPT Plus/Pro (Codex, headless/device)" (enable device code login under ChatGPT > Settings > Security first). | sign-in tokens live inside the sandbox (`~/.omp/agent/agent.db`); `logout chatgpt` to remove |
 | ChatGPT plan via Codex CLI | installs the official Codex CLI (pinned, matching Astrid's Codex adapter). Only Codex may reach chatgpt.com and auth.openai.com; Bun may fetch the adapter from npm. Sign in with `astrid-openshell.sh login codex` (device code; enable it under ChatGPT > Settings > Security first). | sign-in tokens live inside the sandbox; `logout codex` to remove |
-| ComfyUI on this machine | Astrid's local generation (`vibecomfy.run` with `comfy_url`) on your running ComfyUI: core API only on the port you give (queue, upload, history, view, `/ws`); ComfyUI-Manager, settings and userdata writes, and custom-node routes are refused. A relay inside the sandbox serves it as `127.0.0.1:<port>`, the only form Astrid accepts. ComfyUI's output folder is shared read-only (see below). | none |
 | Hugging Face | read-only model and dataset downloads (huggingface.co and its file CDNs) | optional `HF_TOKEN`, kept outside the sandbox |
 | OpenAI / Anthropic / OpenRouter API key | Astrid's own agent (Bun) to that API only | kept outside the sandbox |
+| ComfyUI on this machine | Astrid's local generation (`vibecomfy.run` with `comfy_url`) on your running ComfyUI: core API only on the port you give (queue, upload, history, view, `/ws`); ComfyUI-Manager, settings and userdata writes, and custom-node routes are refused. A relay inside the sandbox serves it as `127.0.0.1:<port>`, the only form Astrid accepts. ComfyUI's output folder is shared read-only (see below). | none |
 
 The menu asks for a key when you switch a service on (hidden input), or reads
 it from the service's environment variable. OpenShell stores it in the
@@ -121,6 +144,7 @@ The folder is shared read-only at the path ComfyUI reports, so Astrid's
 
 ```sh
 astrid-openshell.sh status          # sandbox phase and forwards
+astrid-openshell.sh restart         # stop and restart Runtime inside the VM
 astrid-openshell.sh stop            # stop the VM, keep its disk
 astrid-openshell.sh resume && astrid-openshell.sh start && astrid-openshell.sh door
 astrid-openshell.sh shell           # a shell inside the sandbox
@@ -148,10 +172,9 @@ named local repository into the sandbox as a bare repository and rewrites
   Runtime. Re-running the install line would re-fetch its sources, which the
   run-time policy blocks, so `start` launches Runtime the way that fallback
   does.
-- **No pidfds in the sandbox.** OpenShell's seccomp filter denies
-  `pidfd_open` and `pidfd_send_signal`, and Runtime only signals processes
-  through pidfds. So Runtime can't be stopped from inside: to restart it, run
-  `stop`, then `resume`, `start` and `door`.
+- **Restarting Runtime.** Use `astrid-openshell.sh restart`; it calls Runtime's
+  `down` command inside the VM, then starts Runtime again. If the VM itself was
+  stopped, use `resume`, then `start` and `door`.
 - **Runtime needs O_PATH directory walks.** Under Landlock, the sandbox can
   traverse `/` but not read it. Runtime versions without the
   `runtime_protocol/dirfd.py` ancestor-walk fix stop at startup with

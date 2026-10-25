@@ -42,6 +42,14 @@ INSTALL_HOSTS = [
     "remotion.media",  # Remotion's headless browser (fetched on first render; install-time fetch is a TODO)
 ]
 INSTALL_BINARIES = ["/usr/bin/curl", *CATALOG["binaries"]["astrid_tools"]]
+USAGE = (
+    "usage: compose_policy.py [--mount PATH]... "
+    "{install|run MODE [SERVICE ...]|boundary MODE [SERVICE ...]|profile SERVICE|menu|field SERVICE KEY}"
+)
+
+
+def usage(message: str) -> None:
+    raise SystemExit(f"{message}\n{USAGE}")
 
 
 def binaries(groups: list[str]) -> list[dict]:
@@ -165,12 +173,19 @@ def provider_rule(name: str) -> dict:
 
 
 def main(argv: list[str]) -> None:
+    argv = list(argv)
     mounts = []
     while argv[:1] == ["--mount"]:
+        if len(argv) < 2:
+            usage("--mount requires PATH")
         mounts.append(argv[1])
         argv = argv[2:]
+    if not argv:
+        usage("missing command")
     command, *args = argv
     if command == "install":
+        if args:
+            usage("install takes no arguments")
         policy = base_policy(mounts)
         policy["network_policies"] = {"astrid_install": {
             "name": "astrid-install",
@@ -179,16 +194,26 @@ def main(argv: list[str]) -> None:
             "binaries": [{"path": p} for p in INSTALL_BINARIES]}}
         json.dump(policy, sys.stdout, indent=2)
     elif command == "run":
+        if not args:
+            usage("run requires MODE")
         json.dump(run_policy(args[0], args[1:], mounts), sys.stdout, indent=2)
     elif command == "boundary":
+        if not args:
+            usage("boundary requires MODE")
         policy = run_policy(args[0], args[1:], mounts)
         _, with_credential, _ = parse(args[1:])
         for name in sorted(with_credential):
             policy.setdefault("network_policies", {})[f"provider_{name}"] = provider_rule(name)
         json.dump(policy, sys.stdout, indent=2)
     elif command == "profile":
+        if len(args) != 1:
+            usage("profile requires SERVICE")
         name = args[0]
+        if name not in CATALOG["services"]:
+            raise SystemExit(f"unknown service {name!r}")
         service = CATALOG["services"][name]
+        if "credential" not in service:
+            raise SystemExit(f"service {name!r} has no credential provider")
         cred = service["credential"]
         rule = provider_rule(name)
         lines = [
@@ -215,18 +240,24 @@ def main(argv: list[str]) -> None:
         lines += [f"  - {b['path']}" for b in rule["binaries"]]
         print("\n".join(lines))
     elif command == "menu":
+        if args:
+            usage("menu takes no arguments")
         for mode, spec in CATALOG["modes"].items():
             print("\t".join(["mode", mode, spec["title"], spec["summary"]]))
         for name, spec in CATALOG["services"].items():
             print("\t".join(["service", name, spec["title"], spec["summary"]]))
     elif command == "field":
+        if len(args) != 2:
+            usage("field requires SERVICE and KEY")
         name, key = args
+        if name not in CATALOG["services"]:
+            raise SystemExit(f"unknown service {name!r}")
         service = CATALOG["services"][name]
         cred = service.get("credential", {})
         value = service.get(key, cred.get(key.removeprefix("credential_"), "") if key.startswith("credential_") else "")
         print("1" if value is True else "" if value is False else value)
     else:
-        raise SystemExit(f"unknown command {command!r}")
+        usage(f"unknown command {command!r}")
 
 
 if __name__ == "__main__":
