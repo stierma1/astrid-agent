@@ -2953,7 +2953,9 @@ class ProcessCustody:
             return list(argv), {}
         if sys.platform != "darwin":
             probe = process_control_report()
-            if not probe["ok"]:
+            # Custody signals retained incarnations individually; it does not
+            # need killpg when pidfds work, including in strict mode.
+            if probe.get("pidfd") != "available" and not probe["ok"]:
                 raise CustodyError(probe.get("reason") or "incarnation-bound kernel custody is unavailable")
             return list(argv), {}
         policy = _inventory_launch_policy(inventory_context["environment"], inventory_context["cwd"]) if inventory_context is not None and role == "command" else None

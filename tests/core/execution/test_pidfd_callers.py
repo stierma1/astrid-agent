@@ -64,8 +64,16 @@ def test_custody_launch_refuses_when_the_probe_cannot_signal(tmp_path, monkeypat
     runtime_pidfd_provider.pidfd_send_signal.assert_not_called()
 
 
-def test_custody_retains_runtime_pidfd_and_preserves_signal_fences(tmp_path, monkeypatch, runtime_pidfd_provider):
+@pytest.mark.parametrize("group_kill", ["allowed", "denied"])
+def test_custody_retains_runtime_pidfd_and_preserves_signal_fences(tmp_path, monkeypatch, runtime_pidfd_provider, group_kill):
     provider = runtime_pidfd_provider
+    monkeypatch.setattr(platform, "_process_control", "strict")
+    monkeypatch.setattr(custody, "process_control_report", lambda: {
+        "process_control": "strict", "pidfd": "available", "signalling": "pidfd",
+        "process_group_kill": group_kill,
+        "group_signalling": "killpg" if group_kill == "allowed" else "unavailable",
+        "ok": group_kill == "allowed",
+    })
     owner = custody.ProcessCustody(scope_root=tmp_path)
     argv = [sys.executable, "-c", "pass"]
     assert owner.prepare_launch(argv, start_new_session=True) == (argv, {})
@@ -204,6 +212,7 @@ def test_strict_custody_never_falls_back_when_pidfd_open_is_missing(tmp_path, mo
     assert error.value.errno == errno.ENOSYS and not owner._handles
 
 
+@pytest.mark.linux_native
 def test_sandbox_held_launch_is_signalled_through_its_popen(tmp_path, monkeypatch, sandbox_mode):
     monkeypatch.setattr(groups, "held_child_birth_identity", lambda _pid: "boot:5")
     monkeypatch.setattr(groups, "process_birth_identity", lambda pid=None: "actor" if pid is None else "boot:5")
@@ -224,6 +233,7 @@ def test_sandbox_held_launch_is_signalled_through_its_popen(tmp_path, monkeypatc
     process.send_signal.assert_called_once()
 
 
+@pytest.mark.linux_native
 def test_sandbox_descendant_binds_runtime_identity_and_signals_through_runtime(tmp_path, monkeypatch, sandbox_mode):
     identity = {"pid": 456, "uid": 1000, "birth_id": "proc-start-ticks:77", "process_group": 123}
     monkeypatch.setattr(platform, "process_identity", lambda pid: dict(identity) if pid == 456 else None)
@@ -239,6 +249,7 @@ def test_sandbox_descendant_binds_runtime_identity_and_signals_through_runtime(t
     assert sent == [(identity, platform.TERM)]
 
 
+@pytest.mark.linux_native
 def test_sandbox_descendant_with_another_start_time_is_not_admitted(tmp_path, monkeypatch, sandbox_mode):
     monkeypatch.setattr(platform, "process_identity",
                         lambda pid: {"pid": pid, "uid": 1000, "birth_id": "proc-start-ticks:99"})
@@ -248,6 +259,7 @@ def test_sandbox_descendant_with_another_start_time_is_not_admitted(tmp_path, mo
     assert 456 not in owner._handles
 
 
+@pytest.mark.linux_native
 def test_sandbox_signal_to_an_exited_descendant_is_not_an_error(tmp_path, monkeypatch, sandbox_mode):
     identity = {"pid": 456, "uid": 1000, "birth_id": "proc-start-ticks:77"}
     current = {"value": dict(identity)}
