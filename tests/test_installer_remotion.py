@@ -48,3 +48,13 @@ def test_remotion_failed_install_never_publishes_marker(tmp_path):
     with pytest.raises(subprocess.CalledProcessError):
         backend.install_remotion_dependencies(agent, {"ASTRID_NODE_EXECUTABLE": "node"}, Path("npm-cli.js"))
     assert not (remotion / "node_modules/.astrid-package-lock.sha256").exists()
+
+
+@pytest.mark.node
+def test_shared_browser_reinstall_skips_second_download():
+    result = subprocess.run(
+        ["node", "--test", "remotion/tests/shared-browser.test.cjs"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
