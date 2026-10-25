@@ -500,6 +500,10 @@ class Backend:
 
     def upgrade(self, version: Version, data: Path) -> None:
         self.runtime(version, data, "upgrade", profile=True)
+        if self.process_control:
+            # Runtime upgrade preserves support metadata. Apply the latest
+            # install flag before the candidate is started by the service.
+            self._write_process_control(data)
 
     def register(self, version: Version, data: Path) -> None:
         chat_cwd, chat_options = self._prior_chat_settings(version)

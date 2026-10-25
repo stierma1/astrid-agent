@@ -36,10 +36,68 @@ test('an explicit override wins and must exist', () => {
   assert.throws(() => sharedBrowserExecutable({env: {[BROWSER_ENV]: path.join(tmp, 'missing')}, projectRoot: project, root}), /missing browser/);
 });
 
-test('layout matches Remotion download paths per platform', () => {
+test('layout matches Remotion download paths for each supported platform', () => {
   assert.equal(browserRelativePath('darwin', 'arm64'), path.join('chrome-headless-shell', 'mac-arm64', 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell'));
-  assert.equal(browserRelativePath('linux', 'x64'), path.join('chrome-headless-shell', 'linux64', 'chrome-headless-shell-linux64', 'chrome-headless-shell'));
-  assert.throws(() => browserRelativePath('freebsd', 'x64'));
+  assert.equal(browserRelativePath('darwin', 'x64'), path.join('chrome-headless-shell', 'mac-x64', 'chrome-headless-shell-mac-x64', 'chrome-headless-shell'));
+  assert.equal(browserRelativePath('linux', 'arm64'), path.join('chrome-headless-shell', 'linux-arm64', 'chrome-headless-shell-linux-arm64', 'headless_shell'));
+  let amazonLinux2023 = false;
+  try {
+    const release = fs.readFileSync('/etc/os-release', 'utf8');
+    amazonLinux2023 = release.includes('Amazon Linux') && release.includes('VERSION="2023"');
+  } catch {}
+  const linuxX64Executable = amazonLinux2023 ? 'headless_shell' : 'chrome-headless-shell';
+  assert.equal(browserRelativePath('linux', 'x64'), path.join('chrome-headless-shell', 'linux64', 'chrome-headless-shell-linux64', linuxX64Executable));
+  assert.equal(browserRelativePath('win32', 'x64'), path.join('chrome-headless-shell', 'win64', 'chrome-headless-shell-win64', 'chrome-headless-shell.exe'));
+});
+
+test('unsupported platforms resolve to no shared browser', () => {
+  assert.equal(browserRelativePath('freebsd', 'x64'), null);
+  assert.equal(browserRelativePath('win32', 'arm64'), null);
+  assert.equal(sharedBrowserExecutable({env: {}, projectRoot: project, root, platform: 'freebsd', arch: 'x64'}), null);
+});
+
+test('Amazon Linux 2023 x64 uses Remotion headless_shell filename', () => {
+  const preload = path.join(tmp, 'amazon-linux.cjs');
+  const moduleUrl = require('node:url').pathToFileURL(path.join(__dirname, '..', 'shared-browser.mjs')).href;
+  fs.writeFileSync(preload, [
+    "const fs = require('node:fs');",
+    'const readFileSync = fs.readFileSync.bind(fs);',
+    "fs.readFileSync = (file, ...args) => String(file) === '/etc/os-release' ? 'NAME=Amazon Linux\\nVERSION=\"2023\"\\n' : readFileSync(file, ...args);",
+  ].join('\n'));
+  const result = spawnSync(process.execPath, [
+    '--require', preload,
+    '--input-type=module',
+    '-e',
+    `import {browserRelativePath} from ${JSON.stringify(moduleUrl)}; console.log(browserRelativePath('linux', 'x64'));`,
+  ], {encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), path.join('chrome-headless-shell', 'linux64', 'chrome-headless-shell-linux64', 'headless_shell'));
+});
+
+test('unsupported platform fetch prints one note and never calls ensureBrowser', () => {
+  const fixture = path.join(tmp, 'unsupported');
+  const remotion = path.join(fixture, 'remotion');
+  const renderer = path.join(remotion, 'node_modules', '@remotion', 'renderer');
+  const fetchMarker = path.join(fixture, 'ensure-called');
+  const preload = path.join(fixture, 'platform.cjs');
+  fs.mkdirSync(path.join(remotion, 'scripts'), {recursive: true});
+  fs.mkdirSync(renderer, {recursive: true});
+  fs.writeFileSync(path.join(remotion, 'package.json'), '{"type":"module"}');
+  fs.writeFileSync(path.join(renderer, 'package.json'), JSON.stringify({name: '@remotion/renderer', type: 'module', exports: './index.js'}));
+  fs.writeFileSync(path.join(renderer, 'index.js'), `export async function ensureBrowser() { await import('node:fs').then(({default: fs}) => fs.writeFileSync(${JSON.stringify(fetchMarker)}, 'called')); }`);
+  fs.copyFileSync(path.join(__dirname, '..', 'scripts', 'fetch-shared-browser.mjs'), path.join(remotion, 'scripts', 'fetch-shared-browser.mjs'));
+  fs.copyFileSync(path.join(__dirname, '..', 'shared-browser.mjs'), path.join(remotion, 'shared-browser.mjs'));
+  fs.writeFileSync(preload, "Object.defineProperty(process, 'platform', {value: 'freebsd'}); Object.defineProperty(process, 'arch', {value: 'x64'});\n");
+
+  const result = spawnSync(process.execPath, ['--require', preload, 'scripts/fetch-shared-browser.mjs'], {
+    cwd: remotion,
+    encoding: 'utf8',
+    env: {...process.env, HOME: path.join(fixture, 'home'), USERPROFILE: path.join(fixture, 'home')},
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr.trim(), 'Skipping shared Chrome Headless Shell fetch on unsupported platform freebsd/x64; renders will report the missing browser.');
+  assert.equal(fs.existsSync(fetchMarker), false);
 });
 
 test('a project without Remotion installed resolves to null instead of throwing', () => {

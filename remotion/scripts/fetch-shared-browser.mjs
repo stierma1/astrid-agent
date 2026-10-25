@@ -15,6 +15,11 @@ import {
 } from '../shared-browser.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const relative = browserRelativePath();
+if (!relative) {
+  console.error(`Skipping shared Chrome Headless Shell fetch on unsupported platform ${process.platform}/${process.arch}; renders will report the missing browser.`);
+  process.exit(0);
+}
 const version = remotionRendererVersion(projectRoot);
 const existing = sharedBrowserExecutable({projectRoot});
 if (existing) {
@@ -29,7 +34,7 @@ if (existing) {
 const status = await ensureBrowser({logLevel: 'info'});
 const downloaded = path.join(projectRoot, 'node_modules', '.remotion', 'chrome-headless-shell');
 const target = path.join(sharedBrowserRoot(), version, 'chrome-headless-shell');
-if (!fs.existsSync(path.join(downloaded, browserRelativePath().replace(/^chrome-headless-shell[/\\]/, '')))) {
+if (!fs.existsSync(path.join(downloaded, relative.replace(/^chrome-headless-shell[/\\]/, '')))) {
   throw new Error(`Remotion reported ${status.path} but ${downloaded} has no browser to share`);
 }
 fs.mkdirSync(path.dirname(target), {recursive: true});

@@ -37,7 +37,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--uv", type=Path, help="absolute pinned uv executable supplied by the bootstrap")
     result.add_argument("--sandbox", action="store_true",
                         help="run inside a seccomp sandbox such as OpenShell: Runtime's sandbox process control "
-                             "(docs/setup/openshell-sandbox.md); kept by later updates")
+                             "(docs/setup/openshell-sandbox.md); selected for this install or update")
     return result
 
 
@@ -55,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         platform.private_directory(log.parent)
         root = absolute(args.root or default_program_root(Path.home(), sys.platform))
         uv = args.uv or Path(os.environ.get("ASTRID_INSTALL_UV", bootstrap_root(Path.home(), sys.platform) / ("uv.exe" if sys.platform == "win32" else "uv")))
-        backend = Backend(root, log, uv, process_control="sandbox" if args.sandbox else None)
+        process_control = ("sandbox" if args.sandbox else "strict") if mode in {"install", "update"} else None
+        backend = Backend(root, log, uv, process_control=process_control)
         recorded = backend.service.recorded()
         if not recorded:
             prior = read_json(root / "install.json")
@@ -66,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.root and recorded_root != root:
                 raise ValueError(f"The login service already belongs to {recorded_root}.")
             root = recorded_root
-            backend = Backend(root, log, uv, process_control="sandbox" if args.sandbox else None)
+            backend = Backend(root, log, uv, process_control=process_control)
         # Windows keeps open files locked, so its per-user lock must survive
         # removal of both the program directory and the default workspace.
         lock_parent = default_program_root(Path.home(), sys.platform).parent

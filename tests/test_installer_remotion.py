@@ -50,6 +50,22 @@ def test_remotion_failed_install_never_publishes_marker(tmp_path):
     assert not (remotion / "node_modules/.astrid-package-lock.sha256").exists()
 
 
+def test_update_writes_the_latest_process_control_setting(tmp_path):
+    from runtime_protocol import process_control
+
+    data = tmp_path / "data"
+    support = data / "runtime"
+    support.mkdir(parents=True)
+    process_control.write_setting(support, "sandbox")
+    backend = Backend.__new__(Backend)
+    backend.process_control = "strict"
+    backend.runtime = Mock()
+
+    backend.upgrade(None, data)
+
+    assert process_control.read_setting(support) == "strict"
+
+
 @pytest.mark.node
 def test_shared_browser_reinstall_skips_second_download():
     result = subprocess.run(

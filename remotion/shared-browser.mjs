@@ -25,18 +25,33 @@ const defaultProjectRoot = () => (here === null ? process.cwd() : path.resolve(h
 export const sharedBrowserRoot = () =>
   path.join(os.homedir(), 'Library', 'Caches', 'astrid-remotion-browser');
 
-// Remotion's own layout inside a download: chrome-headless-shell/<platform>/<dir>/chrome-headless-shell.
+// Remotion's own layout inside a download: chrome-headless-shell/<platform>/<dir>/<executable>.
 export function browserPlatformDir(platform = process.platform, arch = process.arch) {
-  if (platform === 'darwin') return arch === 'arm64' ? 'mac-arm64' : 'mac-x64';
+  if (platform === 'darwin' && arch === 'arm64') return 'mac-arm64';
+  if (platform === 'darwin' && arch === 'x64') return 'mac-x64';
+  if (platform === 'linux' && arch === 'arm64') return 'linux-arm64';
   if (platform === 'linux' && arch === 'x64') return 'linux64';
   if (platform === 'win32' && arch === 'x64') return 'win64';
-  throw new Error(`no chrome-headless-shell layout for ${platform}/${arch}`);
+  return null;
 }
 
 export function browserRelativePath(platform = process.platform, arch = process.arch) {
   const dir = browserPlatformDir(platform, arch);
+  if (!dir) return null;
   const exe = platform === 'win32' ? 'chrome-headless-shell.exe' : 'chrome-headless-shell';
-  return path.join('chrome-headless-shell', dir, `chrome-headless-shell-${dir}`, exe);
+  const linuxHeadlessShell = platform === 'linux' &&
+    (arch === 'arm64' || isAmazonLinux2023());
+  const executable = linuxHeadlessShell ? 'headless_shell' : exe;
+  return path.join('chrome-headless-shell', dir, `chrome-headless-shell-${dir}`, executable);
+}
+
+function isAmazonLinux2023() {
+  try {
+    const release = fs.readFileSync('/etc/os-release', 'utf8');
+    return release.includes('Amazon Linux') && release.includes('VERSION="2023"');
+  } catch {
+    return false;
+  }
 }
 
 // The Remotion version this project renders with, read from its installed package
@@ -65,6 +80,8 @@ export function sharedBrowserExecutable({
   }
   const version = remotionRendererVersion(projectRoot);
   if (!version) return null;
-  const candidate = path.join(root, version, browserRelativePath(platform, arch));
+  const relative = browserRelativePath(platform, arch);
+  if (!relative) return null;
+  const candidate = path.join(root, version, relative);
   return fs.existsSync(candidate) ? candidate : null;
 }
