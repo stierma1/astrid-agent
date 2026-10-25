@@ -3830,7 +3830,7 @@ def _configure_apply(subparser: argparse.ArgumentParser) -> None:
     _add_project_arg(subparser, required=False)
     subparser.add_argument("ref", help="Timeline id or slug with a saved working copy.")
     subparser.add_argument("--draft", default=None, help="Working copy name (default: current working copy).")
-    subparser.add_argument("sheet_file", help="Path to the edited cut sheet.")
+    subparser.add_argument("sheet_file", type=Path, help="Path to the edited cut sheet.")
     subparser.set_defaults(handler=_as_timeline_verb(_guarded(2, _cmd_apply)))
 
 

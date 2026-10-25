@@ -44,6 +44,7 @@ If you're building AI agents that consume Astrid capabilities, start with
 capability registry, then the **[SDK Reference](reference/sdk.md)** for the DTO catalog,
 and the **[Platform Contract](contracts/platform-contract.md)** for the normative v1 SDK
 boundary.
+For a local stdio interface, see the **[Astrid MCP server](guides/mcp.md)**.
 
 ### I'm contributing to Astrid
 

@@ -24,6 +24,7 @@ every product handler is a rule-free SDK adapter.
 
 from __future__ import annotations
 
+import argparse
 import importlib
 from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from astrid.core.cli.registration import CommandSpec
 
 __all__ = [
     "FAMILY_PARSER_MODULES",
+    "family_parsers",
     "PRODUCT_FAMILIES",
     "PRODUCT_FAMILY_SET",
     "EXCLUDED_FROM_PRODUCT_CENSUS",
@@ -288,6 +290,19 @@ FAMILY_PARSER_MODULES: dict[str, str] = {
     "tasks": "astrid.core.cli.domain_tasks",
     "runs": "astrid.core.cli.domain_runs",
 }
+
+
+def family_parsers() -> dict[str, argparse.ArgumentParser]:
+    """Build the product-family parsers used by the CLI surface and MCP server."""
+    parsers = {}
+    for family in sorted(PRODUCT_FAMILIES):
+        module = importlib.import_module(FAMILY_PARSER_MODULES[family])
+        kwargs = {}
+        if family == "media":
+            references = importlib.import_module(FAMILY_PARSER_MODULES["references"])
+            kwargs["reference_commands"] = references.COMMANDS
+        parsers[family] = module.build_parser(None, **kwargs)
+    return parsers
 
 
 def command_requires_pack_host(family: str, args: Sequence[str]) -> bool:

@@ -24,7 +24,6 @@ to stderr. Standard library only.
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import re
@@ -35,14 +34,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from astrid.core.cli.domain_product import family_parsers
+
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
-EXCLUDED = {("preferences", "checkin"), ("preferences", "edit")}
-READ_ONLY_VERBS = {
-    "assets", "check", "context", "current", "diff", "elements", "events", "find", "follow",
-    "history", "inspect", "lines", "lint", "list", "log", "show", "status", "verify",
-    "visualize", "words",
-}
-DESTRUCTIVE_VERBS = {"archive", "cancel", "discard", "remove"}
+EXCLUDED = {("preferences", "checkin"), ("preferences", "edit"), ("tasks", "follow")}
 TIMEOUT = float(os.environ.get("ASTRID_MCP_TIMEOUT", "900"))
 
 
@@ -51,19 +46,6 @@ def log(message: str) -> None:
 
 
 # --- tools from the CLI parsers ---------------------------------------------
-
-def family_parsers() -> dict[str, argparse.ArgumentParser]:
-    from astrid.core.cli.domain_product import FAMILY_PARSER_MODULES, PRODUCT_FAMILIES
-
-    parsers = {}
-    for family in sorted(PRODUCT_FAMILIES):
-        module = importlib.import_module(FAMILY_PARSER_MODULES[family])
-        kwargs = {}
-        if family == "media":
-            kwargs["reference_commands"] = importlib.import_module(FAMILY_PARSER_MODULES["references"]).COMMANDS
-        parsers[family] = module.build_parser(None, **kwargs)
-    return parsers
-
 
 def _leaves(parser: argparse.ArgumentParser, path: tuple[str, ...], summary: str):
     subs = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
@@ -129,6 +111,8 @@ def build_tools() -> dict[str, dict[str, Any]]:
             for action in leaf._actions:
                 if isinstance(action, argparse._HelpAction):
                     continue
+                if path == ("timelines", "render") and action.dest == "wait":
+                    continue
                 if "--json" in action.option_strings:
                     supports_json = True
                     continue
@@ -151,8 +135,6 @@ def build_tools() -> dict[str, dict[str, Any]]:
                 properties.setdefault(action.dest, schema)
                 if action.required or (not action.option_strings and action.nargs not in ("?", "*")):
                     required.append(action.dest)
-            verb = path[-1]
-            read_only = verb in READ_ONLY_VERBS
             description = summary or leaf.description or f"astrid-tools {' '.join(path)}"
             tools[_tool_name(path)] = {
                 "definition": {
@@ -161,9 +143,6 @@ def build_tools() -> dict[str, dict[str, Any]]:
                     "description": description.strip(),
                     "inputSchema": {"type": "object", "properties": properties, "required": required,
                                     "additionalProperties": False},
-                    "annotations": {"readOnlyHint": read_only,
-                                    "destructiveHint": (not read_only) and verb in DESTRUCTIVE_VERBS,
-                                    "openWorldHint": False},
                 },
                 "kind": "cli", "path": path, "args": args, "json": supports_json,
             }
@@ -180,6 +159,8 @@ def argv_for(tool: dict[str, Any], arguments: dict[str, Any], workdir: Path | No
     argv = list(tool["path"])
     flags: list[str] = []
     for spec in tool["args"]:
+        if tool["path"] == ("timelines", "render") and spec["dest"] == "wait":
+            continue
         if spec.get("output"):
             if workdir is None:
                 raise ValueError("file output needs a working directory")
@@ -220,6 +201,8 @@ def argv_for(tool: dict[str, Any], arguments: dict[str, Any], workdir: Path | No
             flags += [option, *[str(v) for v in value]]
         else:
             flags += [option, str(value)]
+    if tool["path"] == ("timelines", "render"):
+        flags.append("--detach")
     return argv + flags + (["--json"] if tool["json"] else [])
 
 
@@ -302,16 +285,30 @@ def _comfy_workflow_import(arguments: dict[str, Any], workdir: Path) -> dict[str
     import urllib.parse
     import urllib.request
 
+    project = arguments.get("project")
+    if not isinstance(project, str) or not project.strip():
+        return _text("project is required", error=True)
     url = str(arguments.get("comfy_url") or "http://127.0.0.1:8188").rstrip("/")
-    parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "localhost") or parts.path not in ("", "/"):
+    try:
+        parts = urllib.parse.urlsplit(url)
+        loopback = parts.hostname in ("127.0.0.1", "localhost")
+    except ValueError:
+        parts = None
+        loopback = False
+    if (parts is None or parts.scheme != "http" or not loopback or parts.path not in ("", "/") or
+            parts.username is not None or parts.password is not None or parts.query or parts.fragment):
         return _text("comfy_url must be loopback, e.g. http://127.0.0.1:8188", error=True)
     name = str(arguments.get("name") or "")
     if not name.endswith(".json") or "/" in name or "\\" in name or name.startswith("."):
         return _text("name must be a saved workflow file name such as portrait.json (see comfy_scan)", error=True)
     source = f"{url}/userdata/{urllib.parse.quote('workflows/' + name, safe='')}"
     try:
-        with urllib.request.urlopen(source, timeout=30) as response:
+        class RefuseRedirects(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(RefuseRedirects)
+        with opener.open(source, timeout=30) as response:
             raw = response.read(64 * 1024 * 1024 + 1)
     except (OSError, urllib.error.URLError) as exc:
         return _text(f"could not read {source}: {exc}", error=True)
@@ -325,7 +322,7 @@ def _comfy_workflow_import(arguments: dict[str, Any], workdir: Path) -> dict[str
     target.write_bytes(raw)
     executable = Path(sys.executable).with_name("astrid-tools")
     command = [str(executable)] if executable.exists() else [sys.executable, "-m", "astrid.core.gateway"]
-    done = _run([*command, "media", "import", str(target), "--project", str(arguments["project"]), "--json"], workdir)
+    done = _run([*command, "media", "import", str(target), "--project", project, "--json"], workdir)
     return done if isinstance(done, dict) else _cli_result(done)
 
 
@@ -424,25 +421,24 @@ def _timeline_document_add_shot(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extra_tools() -> dict[str, dict[str, Any]]:
-    def tool(name, description, properties, required, read_only, **extra):
+    def tool(name, description, properties, required, **extra):
         return name, {"definition": {
             "name": name, "title": "astrid " + name.replace("_", " "), "description": description,
             "inputSchema": {"type": "object", "properties": properties, "required": required,
                             "additionalProperties": False},
-            "annotations": {"readOnlyHint": read_only, "destructiveHint": False, "openWorldHint": False},
         }, **extra}
     document = {"type": ["object", "string"],
                 "description": "The timeline document from timeline_document_checkout, edited (JSON)."}
     return dict([
-        tool("skills_list", "List Astrid's pack skills (name and when to use each).", {}, [], True,
+        tool("skills_list", "List Astrid's pack skills (name and when to use each).", {}, [],
              kind="skills_list"),
         tool("skill_get", "Read one Astrid skill (SKILL.md) before multi-step work in its area.",
-             {"name": {"type": "string", "description": "Skill name from skills_list."}}, ["name"], True,
+             {"name": {"type": "string", "description": "Skill name from skills_list."}}, ["name"],
              kind="skill_get"),
         tool("invoke",
              "Admit one capability run (an executor or orchestrator, e.g. vibecomfy.run or "
-             "generation.generate_video), the way Astrid's own agent does. Returns at admission "
-             "with the task id; follow it with tasks_follow or tasks_show, stop it with tasks_cancel. "
+             "generation.generate_video), the way Astrid's own agent does. Returns after admission "
+             "with the task id; poll it with tasks_show. Render runs detached, so poll its task the same way. "
              "Read the capability's skill (skill_get) for its inputs first.",
              {"capability_id": {"type": "string", "description": "Capability id, e.g. vibecomfy.run."},
               "kind": {"type": "string", "enum": ["executor", "orchestrator"],
@@ -450,25 +446,25 @@ def _extra_tools() -> dict[str, dict[str, Any]]:
               "project": {"type": "string", "description": "Project slug or ID."},
               "inputs": {"type": "object", "description": "The capability's inputs as a JSON object."},
               "execution_request": {"type": "object", "description": "Optional target-aware execution request."}},
-             ["capability_id", "project"], False, kind="invoke"),
+             ["capability_id", "project"], kind="invoke"),
         tool("comfy_scan",
              "Find the user's running ComfyUI (vibecomfy local scan): URL, output folder, saved "
              "workflows, Manager, its Python. Read-only.",
              {"ports": {"type": "string", "description": "Comma-separated ports (default 8188,8000)."}},
-             [], True, kind="comfy_scan"),
+             [], kind="comfy_scan"),
         tool("comfy_workflow_import",
              "Read one saved workflow from the user's ComfyUI (read-only GET of /userdata/workflows/NAME) "
              "and import it into the project; the result's digest is vibecomfy.run's workflow input.",
              {"project": {"type": "string", "description": "Project slug or ID."},
               "name": {"type": "string", "description": "Saved workflow file name from comfy_scan, e.g. portrait.json."},
               "comfy_url": {"type": "string", "description": "Loopback ComfyUI URL (default http://127.0.0.1:8188)."}},
-             ["project", "name"], False, kind="comfy_workflow_import"),
+             ["project", "name"], kind="comfy_workflow_import"),
         tool("timeline_document_checkout",
              "Check out a timeline as one editable JSON document (placements, shots, clips). "
              "Use it to put the first clips on an empty timeline, then check and publish it.",
              {"project": {"type": "string", "description": "Project slug or ID."},
               "timeline": {"type": "string", "description": "Timeline slug or ID."}},
-             ["project", "timeline"], True, kind="timeline_document", command="checkout"),
+             ["project", "timeline"], kind="timeline_document", command="checkout"),
         tool("timeline_document_add_shot",
              "Add one new, empty shot to a timeline document (Astrid SDK add_authoring_shot) and place it; "
              "returns the updated document. For an empty timeline: checkout, add_shot, put a track and clips "
@@ -480,15 +476,15 @@ def _extra_tools() -> dict[str, dict[str, Any]]:
               "occurrence_id": {"type": "string", "description": "Optional explicit placement (occurrence) ID."},
               "start_ms": {"type": "number", "description": "Placement start in milliseconds (default 0)."},
               "duration_ms": {"type": "number", "description": "Placement window duration in milliseconds."}},
-             ["document"], True, kind="timeline_document", command="add_shot"),
+             ["document"], kind="timeline_document", command="add_shot"),
         tool("timeline_document_check",
              "Validate an edited timeline document and show its diff and media imports, without publishing.",
-             {"document": document}, ["document"], True, kind="timeline_document", command="check"),
+             {"document": document}, ["document"], kind="timeline_document", command="check"),
         tool("timeline_document_publish",
              "Publish an edited timeline document as one new timeline revision.",
              {"document": document,
               "idempotency_key": {"type": "string", "description": "A new unique key for this publication."}},
-             ["document", "idempotency_key"], False, kind="timeline_document", command="publish"),
+             ["document", "idempotency_key"], kind="timeline_document", command="publish"),
     ])
 
 

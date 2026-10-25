@@ -157,7 +157,7 @@ def _configure_text(subparser: argparse.ArgumentParser) -> None:
             command.add_argument("shot", help="Registered shot id.")
             content = command.add_mutually_exclusive_group(required=True)
             content.add_argument("--text", help="Exact narration, prompt, or transcript text.")
-            content.add_argument("--text-file", help="UTF-8 text file (including its exact whitespace).")
+            content.add_argument("--text-file", type=Path, help="UTF-8 text file (including its exact whitespace).")
             command.add_argument("--expected-head", type=int, required=True, help="0 for creation; current binding head for edits.")
             _add_idempotency_key(command)
 

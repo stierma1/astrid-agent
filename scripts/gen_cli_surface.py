@@ -13,7 +13,6 @@ The exported file is versioned together with diagnostics and behavioral fixtures
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -43,16 +42,10 @@ def _walk(parser: argparse.ArgumentParser) -> dict:
 
 
 def build() -> dict:
-    from astrid.core.cli.domain_product import FAMILY_PARSER_MODULES, PRODUCT_FAMILIES
+    from astrid.core.cli.domain_product import PRODUCT_FAMILIES, family_parsers
     from astrid.core.gateway.dispatch import _top_level_commands
 
-    families: dict = {}
-    for family in sorted(PRODUCT_FAMILIES):
-        module = importlib.import_module(FAMILY_PARSER_MODULES[family])
-        kwargs = {}
-        if family == "media":
-            kwargs["reference_commands"] = importlib.import_module(FAMILY_PARSER_MODULES["references"]).COMMANDS
-        families[family] = _walk(module.build_parser(None, **kwargs))
+    families = {family: _walk(parser) for family, parser in family_parsers().items()}
     operational = sorted(_top_level_commands() - set(PRODUCT_FAMILIES))
     return {"binary": "astrid-tools", "families": families, "operational_commands": operational}
 
